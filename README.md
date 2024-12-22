@@ -7,3 +7,12 @@ in the 'platform.ini' file add a new line "lib_deps = https://github.com/DanielK
 provided file is for src > main.cpp
 
 Wire the GND to GND, 3v3 to 3v3, Rx to D4, Tx to D5
+
+
+# Command line installation and execution
+
+On MacOS:
+
+    brew install platform
+    cd 'CanTestV4.2 - Two Motor'
+    platformio run -e esp32doit-devkit-v1
