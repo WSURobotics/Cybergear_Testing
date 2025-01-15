@@ -13,9 +13,17 @@
 #define TRANSMIT_RATE_MS 1000
 #define POLLING_RATE_MS 1000
 
+static int incomingByte = -1;
 static bool driver_installed = false;
 static bool rotate_clockwise = false;
 unsigned long previousMillis = 0;  // will store last time a message was send
+
+// For microcontroller manual PID tuning
+float Kp = 2.0, Ki = 0.0, Kd = 0.00;
+float maxIntegral = 100.0, maxOutput = 6.25;
+float desiredPosition = 0.0, currentPosition = 0.0;
+float integral = 0.0;
+float previousError = 0.0;
 
 // Define the CAN ID's for each motor
 uint8_t CYBERGEAR_CAN_ID1 = 0x65;
@@ -28,7 +36,7 @@ uint8_t CYBERGEAR_CAN_ID7 = 0x6B;
 uint8_t CYBERGEAR_CAN_ID8 = 0x6C;
 uint8_t CYBERGEAR_CAN_ID9 = 0x6D;
 uint8_t CYBERGEAR_CAN_ID10 = 0x6E;
-uint8_t CYBERGEAR_CAN_ID11 = 0x6f; // was 6f!! changed to motor 13
+uint8_t CYBERGEAR_CAN_ID11 = 0x6f; 
 uint8_t CYBERGEAR_CAN_ID12 = 0x70;
 uint8_t MASTER_CAN_ID = 0x00;
 
@@ -61,6 +69,7 @@ static void all_motor_pos_to_zero();
 static void handle_rx_message(twai_message_t& message);
 static void check_alerts();
 static void walk_cycle(int polarity, std::map<std::string, XiaomiCyberGearDriver> dict);
+static void pid_control(float dt, float desired, float current, XiaomiCyberGearDriver cybergear);
 
 void setup() {
   // Define Dictionary of Cybergears
@@ -68,18 +77,30 @@ void setup() {
   dictFR["Knee"] = gearArr[10];
   dictFR["Ankle"] = gearArr[9];
 
+  dictFL["Hip"] = gearArr[8];
+  dictFL["Knee"] = gearArr[7];
+  dictFL["Ankle"] = gearArr[6];
+
+  dictBR["Hip"] = gearArr[5];
+  dictBR["Knee"] = gearArr[4];
+  dictBR["Ankle"] = gearArr[3];
+
+  dictBL["Hip"] = gearArr[2];
+  dictBL["Knee"] = gearArr[1];
+  dictBL["Ankle"] = gearArr[0];
+
   delay(1000);
   initialize_all_motors(); // All initializing for all motors
   delay(2000);
   all_motor_pos_to_zero(); // Power all motors and set positions to zero
 
-  // Set up our walk cycle (testing block)
-  // dictFR["Knee"].set_position_ref(-1.33 * -1);
-  // dictFR["Ankle"].set_position_ref(1.39 * -1);
-  // delay(2000);
-  // gearArr[9].set_limit_speed(3.0f);
-  // gearArr[10].set_limit_speed(3.0f);
-  // delay(1000);
+  //Set up our walk cycle (testing block) START AT STRAIGHT LEG!!!!!!
+  //dictFR["Knee"].set_position_ref(-1.33 * -1);
+  //dictFR["Ankle"].set_position_ref(1.39 * -1);
+  delay(5000);
+  gearArr[9].set_limit_speed(3.0f);
+  gearArr[10].set_limit_speed(3.0f);
+  delay(1000);
 }
 
 void loop() {
@@ -89,26 +110,45 @@ void loop() {
     return;
   }
 
-  delay(30);
-  //check_alerts();
-
-  // Looping the walk cycle ===================================
-  //walk_cycle(-1, dictFR);
-  // Looping the walk cycle ===================================
-
+  delay(30); // 30/1000 = 0.03 seconds
+  check_alerts();
+   
   // Get status for serial output
-  XiaomiCyberGearStatus cybergear_status = gearArr[0].get_status();
-  Serial.printf("Motor 1: POS:%f V:%f T:%f temp:%d\n", cybergear_status.position, cybergear_status.speed, cybergear_status.torque, cybergear_status.temperature);
+  XiaomiCyberGearStatus cybergear_status = gearArr[9].get_status();
+  Serial.printf("Motor: POS:%f V:%f T:%f temp:%d\n", cybergear_status.position, cybergear_status.speed, cybergear_status.torque, cybergear_status.temperature);
   unsigned long currentMillis = millis();
   if (currentMillis - previousMillis >= TRANSMIT_RATE_MS) {
     previousMillis = currentMillis;
-    gearArr[0].request_status();
+    gearArr[9].request_status();
   }
+
+
+  float currentPos = cybergear_status.position;
+  float desiredPos = 0.0;
+  //pid_control(0.03, desiredPos, currentPos, gearArr[9]);
+
+  // Looping the walk cycle ===================================
+  std::thread a(walk_cycle, -1, dictFR);
+  std::thread b(walk_cycle, 1, dictBL);
+  delay(1000);
+  std::thread c(walk_cycle, 1, dictFL);
+  std::thread d(walk_cycle, -1, dictBR);
+
+  a.join();
+  b.join();
+  c.join();
+  d.join();
+
+  //walk_cycle(-1, dictFR);
+  //walk_cycle(1, dictFL);
+  //walk_cycle(-1, dictBR);
+  //walk_cycle(1, dictBL);
+  // Looping the walk cycle ===================================
 }
 
 static void handle_rx_message(twai_message_t& message) {
-  if (((message.identifier & 0xFF00) >> 8) == CYBERGEAR_CAN_ID1){
-    gearArr[0].process_message(message);
+  if (((message.identifier & 0xFF00) >> 8) == CYBERGEAR_CAN_ID10){
+    gearArr[9].process_message(message);
   }
 }
 
@@ -132,10 +172,10 @@ static void initialize_all_motors()
   {
     Serial.printf("cybergear{%d} init\n", i);
     gearArr[i].init_motor(MODE_POSITION); 
-    gearArr[i].set_limit_speed(1.0f); /* set the maximum speed of the motor */ // was set to 10.0f!
-    gearArr[i].set_limit_current(6.0); /* current limit allows faster operation */
+    gearArr[i].set_limit_speed(2.0f); /* set the maximum speed of the motor */ // was set to 10.0f!
+    gearArr[i].set_limit_current(6.0); /* current limit allows faster operation */ // was set to 6.0
     gearArr[i].set_limit_torque(1.5f); // lowered from 1.5
-    gearArr[i].set_position_kp(0.0f);
+    //gearArr[i].set_position_kp(500.0f);
     gearArr[i].enable_motor(); /* turn on the motor */
   }
   driver_installed = true;
@@ -287,4 +327,38 @@ static void walk_cycle(int polarity, std::map<std::string, XiaomiCyberGearDriver
   Knee.set_position_ref(-1.3 * polarity);
   Ankle.set_position_ref(1.48 * polarity);
   delay(100);
+}
+
+
+void pid_control(float dt, float desired, float current, XiaomiCyberGearDriver cybergear) // dt = change in time slice (ie, delay(30))
+{
+    desiredPosition = desired;
+    currentPosition = current;
+    float error = desiredPosition - currentPosition;
+
+    // proportional term
+    float proportionalTerm = Kp * error;
+
+    // Integral term
+    integral += error * dt;
+    if (integral > maxIntegral) 
+      integral = maxIntegral;
+
+    if (integral < -maxIntegral) 
+      integral = -maxIntegral;
+
+    float integralTerm = Ki * integral;
+
+    // Derivative term
+    float derivative = (error - previousError) / dt;
+    float derivativeTerm = Kd * derivative;
+
+    // Compute output
+    float output = proportionalTerm + integralTerm + derivativeTerm;
+    if (output > maxOutput) output = maxOutput;
+    if (output < -maxOutput) output = -maxOutput;
+
+    // Set and move on
+    cybergear.set_position_ref(output);
+    previousError = error;
 }
