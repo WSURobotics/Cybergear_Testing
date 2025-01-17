@@ -5,6 +5,22 @@
 #include <map>
 #include <string>
 
+// =======================================================================================================
+// How to add the custom 'all_motor_pos_to_zero()' function:
+// 1) Copy the following
+//      void motor_pos_to_zero();
+//    Navigate to the project > .pio > libdeps > Xiaomi_CyberGear_Arduino > xioami_cybergear_driver.h
+//    Paste anywhere in the 'public' section of class XiaomiCyberGearDriver
+//
+// 2) Copy the following
+//      void XiaomiCyberGearDriver::motor_pos_to_zero(){
+//      uint8_t data[8] = {0x01};
+//      _send_can_package(_cybergear_can_id, CMD_SET_MECH_POSITION_TO_ZERO,_master_can_id, 8, data);
+//      }
+//    Navigate to the project > .pio > libdeps > Xiaomi_CyberGear_Arduino > xioami_cybergear_driver.cpp
+//    Paste at the very bottom of the file
+// =======================================================================================================
+
 // Pins used to connect to CAN bus transceiver:
 #define RX_PIN 4
 #define TX_PIN 5
@@ -17,13 +33,19 @@ static int incomingByte = -1;
 static bool driver_installed = false;
 static bool rotate_clockwise = false;
 unsigned long previousMillis = 0;  // will store last time a message was send
+static int readCanID = 3; // ie 0 = read motor 1
 
 // For microcontroller manual PID tuning
-float Kp = 2.0, Ki = 0.0, Kd = 0.00;
-float maxIntegral = 100.0, maxOutput = 6.25;
+// Ankle ascillation at 1.7KP with 6.0 current limit
+float Kp = 0.85, Ki = 0.60, Kd = 0.08;
+float maxIntegral = 6.0, maxOutput = 10000;
 float desiredPosition = 0.0, currentPosition = 0.0;
 float integral = 0.0;
 float previousError = 0.0;
+
+// for threading
+unsigned long lastStartTime = 0;
+const unsigned long groupDelay = 1000; // 1 second
 
 // Define the CAN ID's for each motor
 uint8_t CYBERGEAR_CAN_ID1 = 0x65;
@@ -94,19 +116,13 @@ void setup() {
   delay(2000);
   all_motor_pos_to_zero(); // Power all motors and set positions to zero
 
-  //Set up our walk cycle (testing block) START AT STRAIGHT LEG!!!!!!
-  //dictFR["Knee"].set_position_ref(-1.33 * -1);
-  //dictFR["Ankle"].set_position_ref(1.39 * -1);
-  delay(5000);
-  gearArr[9].set_limit_speed(3.0f);
-  gearArr[10].set_limit_speed(3.0f);
   delay(1000);
 }
 
 void loop() {
   if (!driver_installed) {
     delay(5000);
-    Serial.printf("Driver not installed - bool is false?");
+    Serial.printf("Driver not installed - bool is false");
     return;
   }
 
@@ -114,41 +130,38 @@ void loop() {
   check_alerts();
    
   // Get status for serial output
-  XiaomiCyberGearStatus cybergear_status = gearArr[9].get_status();
-  Serial.printf("Motor: POS:%f V:%f T:%f temp:%d\n", cybergear_status.position, cybergear_status.speed, cybergear_status.torque, cybergear_status.temperature);
+  XiaomiCyberGearStatus cybergear_status = gearArr[readCanID].get_status();
+  //Serial.printf("Motor: POS:%f V:%f T:%f temp:%d\n", cybergear_status.position, cybergear_status.speed, cybergear_status.torque, cybergear_status.temperature);
   unsigned long currentMillis = millis();
   if (currentMillis - previousMillis >= TRANSMIT_RATE_MS) {
     previousMillis = currentMillis;
-    gearArr[9].request_status();
+    gearArr[readCanID].request_status();
   }
 
+  // Manual PID tuning block - TO BE TESTED (initialize motors to MODE_CURRENT)
+  // float currentPos = cybergear_status.position;
+  // float desiredPos = -1.0;
+  // pid_control(0.03, desiredPos, currentPos, gearArr[readCanID]);
 
-  float currentPos = cybergear_status.position;
-  float desiredPos = 0.0;
-  //pid_control(0.03, desiredPos, currentPos, gearArr[9]);
+  // ==================================================================================
+  // START AT STRAIGHT LEG ORIENTATION IF EVER USING WALK CYCLE (all legs straight out)
+  // ==================================================================================
 
-  // Looping the walk cycle ===================================
-  std::thread a(walk_cycle, -1, dictFR);
-  std::thread b(walk_cycle, 1, dictBL);
-  delay(1000);
-  std::thread c(walk_cycle, 1, dictFL);
-  std::thread d(walk_cycle, -1, dictBR);
-
-  a.join();
-  b.join();
-  c.join();
-  d.join();
-
-  //walk_cycle(-1, dictFR);
-  //walk_cycle(1, dictFL);
-  //walk_cycle(-1, dictBR);
-  //walk_cycle(1, dictBL);
-  // Looping the walk cycle ===================================
+  // std::thread a(walk_cycle, -1, dictFR);
+  // std::thread b(walk_cycle, 1, dictBL);
+  // a.detach();
+  // b.detach();
+  // delay(1350);
+  // std::thread c(walk_cycle, 1, dictFL);
+  // std::thread d(walk_cycle, -1, dictBR);
+  // c.detach();
+  // d.detach();
+  // delay(1350);
 }
 
 static void handle_rx_message(twai_message_t& message) {
-  if (((message.identifier & 0xFF00) >> 8) == CYBERGEAR_CAN_ID10){
-    gearArr[9].process_message(message);
+  if (((message.identifier & 0xFF00) >> 8) == gearArr[readCanID].get_motor_can_id()){
+    gearArr[readCanID].process_message(message);
   }
 }
 
@@ -184,7 +197,7 @@ static void initialize_all_motors()
 static void check_alerts(){
   // Check if alert happened
   uint32_t alerts_triggered;
-  twai_read_alerts(&alerts_triggered, pdMS_TO_TICKS(POLLING_RATE_MS)); // problem child??
+  twai_read_alerts(&alerts_triggered, pdMS_TO_TICKS(POLLING_RATE_MS));
   twai_status_info_t twai_status;
   twai_get_status_info(&twai_status);
 
@@ -214,12 +227,11 @@ static void check_alerts(){
 
 static void walk_cycle(int polarity, std::map<std::string, XiaomiCyberGearDriver> dict)
 {
-  // Assuming the motors are set to position 0 straight down...
+  // Assuming the motors are set to position 0, legs are straight out/down
 
   XiaomiCyberGearDriver Knee = dict["Knee"];
   XiaomiCyberGearDriver Ankle = dict["Ankle"];
 
-  //delay(2000);
   Knee.set_position_ref(-1.33 * polarity);
   Ankle.set_position_ref(1.39 * polarity);
   delay(100);
@@ -347,6 +359,8 @@ void pid_control(float dt, float desired, float current, XiaomiCyberGearDriver c
     if (integral < -maxIntegral) 
       integral = -maxIntegral;
 
+    Serial.println(integral);
+
     float integralTerm = Ki * integral;
 
     // Derivative term
@@ -359,6 +373,7 @@ void pid_control(float dt, float desired, float current, XiaomiCyberGearDriver c
     if (output < -maxOutput) output = -maxOutput;
 
     // Set and move on
-    cybergear.set_position_ref(output);
+    //cybergear.set_position_ref(output);
+    cybergear.set_current_ref(output);
     previousError = error;
 }
