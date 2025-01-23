@@ -29,15 +29,17 @@
 #define TRANSMIT_RATE_MS 1000
 #define POLLING_RATE_MS 1000
 
+static bool stall = false;
+
 static int incomingByte = -1;
 static bool driver_installed = false;
 static bool rotate_clockwise = false;
 unsigned long previousMillis = 0;  // will store last time a message was send
-static int readCanID = 3; // ie 0 = read motor 1
+static int readCanID = 6; // ie 0 = read motor 1 (the motor to print status to serial)
 
 // For microcontroller manual PID tuning
 // Ankle ascillation at 1.7KP with 6.0 current limit
-float Kp = 0.85, Ki = 0.60, Kd = 0.08;
+float Kp = 3.3, Ki = 0.1, Kd = 0.3; // 0.85, 0.6, 0.08
 float maxIntegral = 6.0, maxOutput = 10000;
 float desiredPosition = 0.0, currentPosition = 0.0;
 float integral = 0.0;
@@ -84,6 +86,8 @@ std::map<std::string, XiaomiCyberGearDriver> dictFL; // Front Left Leg
 std::map<std::string, XiaomiCyberGearDriver> dictBR; // Back Right Leg
 std::map<std::string, XiaomiCyberGearDriver> dictBL; // Back Left Leg
 
+XiaomiCyberGearStatus statusArr[12];
+
 
 // function declarations
 static void initialize_all_motors();
@@ -91,7 +95,9 @@ static void all_motor_pos_to_zero();
 static void handle_rx_message(twai_message_t& message);
 static void check_alerts();
 static void walk_cycle(int polarity, std::map<std::string, XiaomiCyberGearDriver> dict);
+static void updated_walk_cycle(int polarity, std::map<std::string, XiaomiCyberGearDriver> dict);
 static void pid_control(float dt, float desired, float current, XiaomiCyberGearDriver cybergear);
+static void normalize();
 
 void setup() {
   // Define Dictionary of Cybergears
@@ -114,8 +120,7 @@ void setup() {
   delay(1000);
   initialize_all_motors(); // All initializing for all motors
   delay(2000);
-  all_motor_pos_to_zero(); // Power all motors and set positions to zero
-
+  //all_motor_pos_to_zero(); // Power all motors and set positions to zero
   delay(1000);
 }
 
@@ -126,12 +131,23 @@ void loop() {
     return;
   }
 
+  // if (!stall)
+  // {
+  //   delay(2000);
+  //   stall = true;
+  // }
+
   delay(30); // 30/1000 = 0.03 seconds
   check_alerts();
    
   // Get status for serial output
+  // for (int i = 0; i < 12; i++)
+  // {
+  //   statusArr[i] = gearArr[i].get_status();
+  // }
+  // ----------------------------
   XiaomiCyberGearStatus cybergear_status = gearArr[readCanID].get_status();
-  //Serial.printf("Motor: POS:%f V:%f T:%f temp:%d\n", cybergear_status.position, cybergear_status.speed, cybergear_status.torque, cybergear_status.temperature);
+  Serial.printf("Motor: POS:%f V:%f T:%f temp:%d\n", cybergear_status.position, cybergear_status.speed, cybergear_status.torque, cybergear_status.temperature);
   unsigned long currentMillis = millis();
   if (currentMillis - previousMillis >= TRANSMIT_RATE_MS) {
     previousMillis = currentMillis;
@@ -139,24 +155,25 @@ void loop() {
   }
 
   // Manual PID tuning block - TO BE TESTED (initialize motors to MODE_CURRENT)
+  // For MODE_CURRENT, current KP values are extreme and should be tested with caution
   // float currentPos = cybergear_status.position;
-  // float desiredPos = -1.0;
+  // float desiredPos = -1.30;
   // pid_control(0.03, desiredPos, currentPos, gearArr[readCanID]);
 
   // ==================================================================================
   // START AT STRAIGHT LEG ORIENTATION IF EVER USING WALK CYCLE (all legs straight out)
   // ==================================================================================
 
-  // std::thread a(walk_cycle, -1, dictFR);
-  // std::thread b(walk_cycle, 1, dictBL);
+  // std::thread a(updated_walk_cycle, -1, dictFR);
+  // std::thread b(updated_walk_cycle, 1, dictBL);
   // a.detach();
   // b.detach();
-  // delay(1350);
-  // std::thread c(walk_cycle, 1, dictFL);
-  // std::thread d(walk_cycle, -1, dictBR);
+  // delay(1012.5);
+  // std::thread c(updated_walk_cycle, 1, dictFL);
+  // std::thread d(updated_walk_cycle, -1, dictBR);
   // c.detach();
   // d.detach();
-  // delay(1350);
+  // delay(982.5);
 }
 
 static void handle_rx_message(twai_message_t& message) {
@@ -184,11 +201,11 @@ static void initialize_all_motors()
   for (int i = 0; i < 12; i++)
   {
     Serial.printf("cybergear{%d} init\n", i);
-    gearArr[i].init_motor(MODE_POSITION); 
+    gearArr[i].init_motor(MODE_CURRENT); 
     gearArr[i].set_limit_speed(2.0f); /* set the maximum speed of the motor */ // was set to 10.0f!
     gearArr[i].set_limit_current(6.0); /* current limit allows faster operation */ // was set to 6.0
-    gearArr[i].set_limit_torque(1.5f); // lowered from 1.5
-    //gearArr[i].set_position_kp(500.0f);
+    gearArr[i].set_limit_torque(6.0f); // lowered from 1.5
+    //gearArr[i].set_position_kp(5000.0f);
     gearArr[i].enable_motor(); /* turn on the motor */
   }
   driver_installed = true;
@@ -223,6 +240,123 @@ static void check_alerts(){
       handle_rx_message(message);
     }
   }
+}
+
+static void updated_walk_cycle(int polarity, std::map<std::string, XiaomiCyberGearDriver> dict)
+{
+  // Assuming the motors are set to position 0, legs are straight out/down
+  
+  XiaomiCyberGearDriver Knee = dict["Knee"];
+  XiaomiCyberGearDriver Ankle = dict["Ankle"];
+  int delaySlice = 75;
+
+  Knee.set_position_ref(-1.21 * polarity);
+  Ankle.set_position_ref(1.50 * polarity);
+  delay(delaySlice);
+
+  Knee.set_position_ref(-1.29 * polarity);
+  Ankle.set_position_ref(1.61 * polarity);
+  delay(delaySlice);
+
+  Knee.set_position_ref(-1.38 * polarity);
+  Ankle.set_position_ref(1.79 * polarity);
+  delay(delaySlice);
+
+  Knee.set_position_ref(-1.39 * polarity);
+  Ankle.set_position_ref(1.90 * polarity);
+  delay(delaySlice);
+
+  Knee.set_position_ref(-1.38 * polarity);
+  Ankle.set_position_ref(1.99 * polarity);
+  delay(delaySlice);
+
+  Knee.set_position_ref(-1.34 * polarity);
+  Ankle.set_position_ref(2.05 * polarity);
+  delay(delaySlice);
+
+  Knee.set_position_ref(-1.28 * polarity);
+  Ankle.set_position_ref(2.08 * polarity);
+  delay(delaySlice);
+
+  Knee.set_position_ref(-1.18 * polarity);
+  Ankle.set_position_ref(2.09 * polarity);
+  delay(delaySlice);
+
+  Knee.set_position_ref(-1.07 * polarity);
+  Ankle.set_position_ref(2.07 * polarity);
+  delay(delaySlice);
+
+  Knee.set_position_ref(-0.97 * polarity);
+  Ankle.set_position_ref(2.03 * polarity);
+  delay(delaySlice);
+
+  Knee.set_position_ref(-0.86 * polarity);
+  Ankle.set_position_ref(1.96 * polarity);
+  delay(delaySlice);
+
+  Knee.set_position_ref(-0.74 * polarity);
+  Ankle.set_position_ref(1.86 * polarity);
+  delay(delaySlice);
+
+  Knee.set_position_ref(-0.64 * polarity);
+  Ankle.set_position_ref(1.70 * polarity);
+  delay(delaySlice);
+
+  Knee.set_position_ref(-0.64 * polarity);
+  Ankle.set_position_ref(1.64 * polarity);
+  delay(delaySlice);
+
+  Knee.set_position_ref(-0.67 * polarity);
+  Ankle.set_position_ref(1.65 * polarity);
+  delay(delaySlice);
+
+  Knee.set_position_ref(-0.72 * polarity);
+  Ankle.set_position_ref(1.66 * polarity);
+  delay(delaySlice);
+
+  Knee.set_position_ref(-0.77 * polarity);
+  Ankle.set_position_ref(1.67 * polarity);
+  delay(delaySlice);
+
+  Knee.set_position_ref(-0.82 * polarity);
+  Ankle.set_position_ref(1.67 * polarity);
+  delay(delaySlice);
+
+  Knee.set_position_ref(-0.88 * polarity);
+  Ankle.set_position_ref(1.68 * polarity);
+  delay(delaySlice);
+
+  Knee.set_position_ref(-0.93 * polarity);
+  Ankle.set_position_ref(1.67 * polarity);
+  delay(delaySlice);
+
+  Knee.set_position_ref(-0.97 * polarity);
+  Ankle.set_position_ref(1.67 * polarity);
+  delay(delaySlice);
+
+  Knee.set_position_ref(-1.01 * polarity);
+  Ankle.set_position_ref(1.66 * polarity);
+  delay(delaySlice);
+
+  Knee.set_position_ref(-1.05 * polarity);
+  Ankle.set_position_ref(1.65 * polarity);
+  delay(delaySlice);
+
+  Knee.set_position_ref(-1.08 * polarity);
+  Ankle.set_position_ref(1.63 * polarity);
+  delay(delaySlice);
+
+  Knee.set_position_ref(-1.12 * polarity);
+  Ankle.set_position_ref(1.61 * polarity);
+  delay(delaySlice);
+
+  Knee.set_position_ref(-1.15 * polarity);
+  Ankle.set_position_ref(1.58 * polarity);
+  delay(delaySlice);
+
+  Knee.set_position_ref(-1.18 * polarity);
+  Ankle.set_position_ref(1.54 * polarity);
+  delay(delaySlice);
 }
 
 static void walk_cycle(int polarity, std::map<std::string, XiaomiCyberGearDriver> dict)
@@ -373,7 +507,14 @@ void pid_control(float dt, float desired, float current, XiaomiCyberGearDriver c
     if (output < -maxOutput) output = -maxOutput;
 
     // Set and move on
-    //cybergear.set_position_ref(output);
     cybergear.set_current_ref(output);
     previousError = error;
+}
+
+static void normalize()
+{
+  for (int i = 0; i < 12; i++)
+  {
+    gearArr[i].set_position_ref(0.0);
+  }
 }
