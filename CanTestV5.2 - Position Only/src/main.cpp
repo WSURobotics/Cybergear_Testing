@@ -1,7 +1,6 @@
 #include <Arduino.h>
 #include "driver/twai.h"
 #include "xiaomi_cybergear_driver.h"
-#include <bits/stdc++.h>
 #include <map>
 #include <string>
 
@@ -32,11 +31,11 @@
 // Static globals
 static bool initStall = false; // If we want an initial stall before starting the loop
 static bool driver_installed = false; // Checks if the motor has been initialized
-unsigned long previousMillis = 0;  // will store last time a message was send
+unsigned long previousMillis = 0;  // will store last time a message was sent
 
-static int readCanID = 9; // ie 0 = read motor 1 (the motor to print status to serial)
+static int readCanID = 9; // ID of the motor to print status to serial
 
-// Define the CAN ID's for each motor
+// Define the CAN IDs for each motor
 uint8_t CYBERGEAR_CAN_ID1 = 0x65;
 uint8_t CYBERGEAR_CAN_ID2 = 0x66;
 uint8_t CYBERGEAR_CAN_ID3 = 0x67;
@@ -47,11 +46,11 @@ uint8_t CYBERGEAR_CAN_ID7 = 0x71; // SWAPPED 7 FOR 13 - MOTOR IS NOW 13!
 uint8_t CYBERGEAR_CAN_ID8 = 0x6C;
 uint8_t CYBERGEAR_CAN_ID9 = 0x6D;
 uint8_t CYBERGEAR_CAN_ID10 = 0x6E;
-uint8_t CYBERGEAR_CAN_ID11 = 0x6f; 
+uint8_t CYBERGEAR_CAN_ID11 = 0x6f;
 uint8_t CYBERGEAR_CAN_ID12 = 0x70;
 uint8_t MASTER_CAN_ID = 0x00;
 
-// array of all 12 cybergears
+// Array of all 12 cybergears
 XiaomiCyberGearDriver gearArr[12] = {
   XiaomiCyberGearDriver(CYBERGEAR_CAN_ID1, MASTER_CAN_ID),
   XiaomiCyberGearDriver(CYBERGEAR_CAN_ID2, MASTER_CAN_ID),
@@ -93,7 +92,7 @@ static bool group2Start = false; // If group 2 has started or not
 static unsigned long startMillis = -1; // Holds the start time
 static unsigned long endMillis = 0; // Holds the end/current time
 
-// function declarations
+// Function declarations
 static void initialize_all_motors(); // Initializes all motors
 static void all_motor_pos_to_zero(); // Sets all motor positions to zero (MODE_POSITION ONLY)
 static void handle_rx_message(twai_message_t& message); // Configures status messages
@@ -116,9 +115,9 @@ void loop() {
   }
 
   delay(60);
-  check_alerts(); // Read incoming can messages
+  check_alerts(); // Read incoming CAN messages
 
-  XiaomiCyberGearStatus cybergear_status = gearArr[readCanID].get_status(); // all this to read/print readCanID motor status
+  XiaomiCyberGearStatus cybergear_status = gearArr[readCanID].get_status(); // Read and print readCanID motor status
   Serial.printf("Motor: POS:%f V:%f T:%f temp:%d\n", cybergear_status.position, cybergear_status.speed, cybergear_status.torque, cybergear_status.temperature);
   unsigned long currentMillis = millis();
   if (currentMillis - previousMillis >= TRANSMIT_RATE_MS) {
@@ -153,7 +152,7 @@ void loop() {
   // {
   //   startMillis = millis();
   // }
-  
+
   gearArr[10].set_position_ref(kneeArray[group1] * -1);
   gearArr[9].set_position_ref(ankleArray[group1] * -1);
   gearArr[1].set_position_ref(kneeArray[group1] * 1);
@@ -165,7 +164,7 @@ void loop() {
   // IF HAS BEEN 1026ms, good 2 go (if end - start => 1026)
   // if (!group2Start)
   //   endMillis = millis();
-  if (!group2Start && group1 == 13) // If group1 is halfway thru cycle, give group2 the OK
+  if (!group2Start && group1 == 13) // If group1 is halfway through cycle, give group2 the OK
     group2Start = true;
   if (group2Start) // If given the OK
   {
@@ -188,7 +187,7 @@ void loop() {
 
   //       int motor;
   //       float position;
-        
+
   //       if (sscanf(command.c_str(), "%d: %f", &motor, &position) == 2) {  // Parse input
   //           Serial.print("Motor: ");
   //           Serial.print(motor);
@@ -210,13 +209,20 @@ void loop() {
   //   }
 }
 
+/**
+ * @brief Handles received CAN messages and processes them.
+ *
+ * @param message The received CAN message.
+ */
 static void handle_rx_message(twai_message_t& message) {
   if (((message.identifier & 0xFF00) >> 8) == gearArr[readCanID].get_motor_can_id()){
     gearArr[readCanID].process_message(message);
   }
 }
 
-// Sets all motor current positions to zero
+/**
+ * @brief Sets all motor current positions to zero.
+ */
 static void all_motor_pos_to_zero()
 {
   for (int i = 0; i < 12; i++)
@@ -228,7 +234,9 @@ static void all_motor_pos_to_zero()
   }
 }
 
-// Initializes all motors
+/**
+ * @brief Initializes all motors.
+ */
 static void initialize_all_motors()
 {
   gearArr[0].init_twai(RX_PIN, TX_PIN, /*serial_debug=*/true); // once for any cybergear
@@ -236,7 +244,7 @@ static void initialize_all_motors()
   for (int i = 0; i < 12; i++)
   {
     Serial.printf("cybergear{%d} init\n", i);
-    gearArr[i].init_motor(MODE_POSITION); 
+    gearArr[i].init_motor(MODE_POSITION);
     gearArr[i].set_limit_speed(6.0f); /* set the maximum speed of the motor */ // was set to 10.0f!
     gearArr[i].set_limit_current(20.0f); /* current limit allows faster operation */ // was set to 6.0
     gearArr[i].set_limit_torque(12.0f); // lowered from 1.5
@@ -247,6 +255,9 @@ static void initialize_all_motors()
   driver_installed = true;
 }
 
+/**
+ * @brief Checks for alerts and handles them.
+ */
 static void check_alerts(){
   // Check if alert happened
   uint32_t alerts_triggered;
