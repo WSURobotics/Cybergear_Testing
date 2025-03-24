@@ -44,10 +44,12 @@
 // Static globals
 static bool initStall = false; // If we want an initial stall before starting the loop
 static bool driver_installed = false; // Checks if the motor has been initialized
-static bool loopStart = false; // Will run the void loop() while true
+static bool loopStart = false; // Will run the walking commands themselves while true
+static bool printStart = false; // Will print motor status while true
 unsigned long previousMillis = 0;  // will store last time a message was send
+static int timeSlice = 30; // The delay in void loop()
 
-static int readCanID = 9; // ie 0 = read motor 1 (the motor to print status to serial)
+static int readCanID = 3; // ie 0 = read motor 1 (the motor to print status to serial)
 
 // Define the CAN ID's for each motor
 uint8_t CYBERGEAR_CAN_ID1 = 0x65;
@@ -80,18 +82,37 @@ XiaomiCyberGearDriver gearArr[12] = {
   XiaomiCyberGearDriver(CYBERGEAR_CAN_ID12, MASTER_CAN_ID)
 };
 
+// WORKING STEPS - MARCH (50 timeSlice)
+// // The 'knee' values for a step, in order
+// float kneeArray[22] = {
+//   -1.12, -1.14, -1.00, -0.89, -0.89, -0.89, -0.89, -0.89, -0.89, -0.91, -0.92, -0.94, -1.07, -1.07, -1.07, -1.07, -1.07, -1.07, -1.07, -1.08, -1.09, -1.10
+// };
+
+// // The 'ankle' values for a step, in order
+// float ankleArray[22] = {
+//   1.61, 2.2, 2.2, 1.74, 1.74, 1.72, 1.70, 1.69, 1.69, 1.68, 1.68, 1.68, 1.60, 1.60, 1.60, 1.60, 1.60, 1.60, 1.60, 1.61, 1.62, 1.62
+// };
+
+// WORKING STEPS - WOBBLY (50 timeSlice)
+// // The 'knee' values for a step, in order
+// float kneeArray[22] = {
+//   -1.12, -1.14, -1.00, -0.89, -0.89, -0.89, -0.89, -0.89, -0.89, -0.91, -0.92, -0.94, -1.07, -1.07, -1.07, -1.07, -1.07, -1.07, -1.07, -1.08, -1.09, -1.10
+// };
+
+// // The 'ankle' values for a step, in order
+// float ankleArray[22] = {
+//   1.61, 2.2, 2.2, 2.1, 1.94, 1.80, 1.70, 1.69, 1.69, 1.68, 1.68, 1.68, 1.60, 1.60, 1.60, 1.60, 1.60, 1.60, 1.60, 1.61, 1.62, 1.62
+// };
+
+// WORKING STEPS - FASTER (30 timeSlice)
 // The 'knee' values for a step, in order
-float kneeArray[27] = {
-    -1.21, -1.29, -1.38, -1.39, -1.38, -1.34, -1.28, -1.18, -1.07, -0.97,
-    -0.86, -0.74, -0.64, -0.64, -0.67, -0.72, -0.77, -0.82, -0.88, -0.93,
-    -0.97, -1.01, -1.05, -1.08, -1.12, -1.15, -1.18
+float kneeArray[22] = {
+  -1.12, -1.00, -0.89, -0.89, -0.89, -0.89, -0.89, -0.89, -0.89, -0.91, -0.92, -0.94, -1.07, -1.07, -1.07, -1.07, -1.07, -1.07, -1.07, -1.08, -1.09, -1.10
 };
 
 // The 'ankle' values for a step, in order
-float ankleArray[27] = {
-    1.50, 1.61, 1.79, 1.90, 1.99, 2.05, 2.08, 2.09, 2.07, 2.03,
-    1.96, 1.86, 1.70, 1.64, 1.65, 1.66, 1.67, 1.67, 1.68, 1.67,
-    1.67, 1.66, 1.65, 1.63, 1.61, 1.58, 1.54
+float ankleArray[22] = {
+  1.61, 2.35, 2.35, 1.74, 1.74, 1.72, 1.70, 1.69, 1.69, 1.68, 1.68, 1.68, 1.60, 1.60, 1.60, 1.60, 1.60, 1.60, 1.60, 1.61, 1.62, 1.62
 };
 
 // FL Polarity: 1
@@ -101,12 +122,14 @@ float ankleArray[27] = {
 
 // For setting walk positions in loop
 static int group1 = 0; // Tracks index of group 1
-static int group2 = 0; // Tracks index of group 2
-static bool group2Start = false; // If group 2 has started or not
+static int group2 = 13; // Tracks index of group 2
 
 // function declarations
 static void initialize_all_motors(); // Initializes all motors
 static void all_motor_pos_to_zero(); // Sets all motor positions to zero (MODE_POSITION ONLY)
+static void normalize_stance(); // Brings motors to (current) default stance, assuming 0.0 is straight leg orientation
+static void strengthen_motors(); // Strengthens motors to dangerously high speed (ie, 20 or 30) for walk strength
+static void weaken_motors(); // Lowers motor speeds back down to safe value
 static void handle_rx_message(twai_message_t& message); // Configures status messages
 static void check_alerts(); // Checks for status messages
 
@@ -127,18 +150,21 @@ void loop() {
     return;
   }
 
-  // Prints target motor status
-  check_alerts(); // Read incoming messages
-  XiaomiCyberGearStatus cybergear_status = gearArr[readCanID].get_status(); // Gets the status
-  Serial.printf("Motor: POS:%f V:%f T:%f temp:%d\n", cybergear_status.position, cybergear_status.speed, cybergear_status.torque, cybergear_status.temperature);
-  unsigned long currentMillis = millis();
-  if (currentMillis - previousMillis >= TRANSMIT_RATE_MS) {
-    previousMillis = currentMillis;
-    gearArr[readCanID].request_status(); // Prompt for status
+  if (printStart)
+  {
+    // Prints target motor status
+    check_alerts(); // Read incoming messages
+    XiaomiCyberGearStatus cybergear_status = gearArr[readCanID].get_status(); // Gets the status
+    Serial.printf("Motor: POS:%f V:%f T:%f temp:%d\n", cybergear_status.position, cybergear_status.speed, cybergear_status.torque, cybergear_status.temperature);
+    unsigned long currentMillis = millis();
+    if (currentMillis - previousMillis >= TRANSMIT_RATE_MS) {
+      previousMillis = currentMillis;
+      gearArr[readCanID].request_status(); // Prompt for status
+    }
   }
 
   // Controlled void loop() timeslice
-  delay(60); // Controls the actual speed of the walking cycle (lower delay = faster the steps happen)
+  delay(timeSlice); // Controls the actual speed of the walking cycle (lower delay = faster the steps happen)
 
   // ==================================================================================
   // PERFORMS ONCE - INITIAL POSITIONS AND RAISES SPEED LIMIT
@@ -147,27 +173,11 @@ void loop() {
   {
     Serial.println("Moving to default stance");
     delay(2000);
-    // Set to a sit
-    gearArr[10].set_position_ref(-1.21 * -1); 
-    gearArr[9].set_position_ref(1.50 * -1);
-    gearArr[7].set_position_ref(-1.21 * 1);
-    gearArr[6].set_position_ref(1.50 * 1);
-    gearArr[4].set_position_ref(-1.21 * -1);
-    gearArr[3].set_position_ref(1.50 * -1);
-    gearArr[1].set_position_ref(-1.21 * 1);
-    gearArr[0].set_position_ref(1.50 * 1);
+    // Set to a standing stance
+    normalize_stance();
 
-    // Initialize motor speed to a higher/stronger value
     delay(3000);
-    Serial.println("Raising speed limit - strength increased");
-    for (int i = 0; i < 12; i++)
-    {
-      gearArr[i].set_limit_speed(20.0f);
-    }
-
-    // Delay before beginning the walk cycle
     Serial.println("Waiting for Serial Command '1' before starting walk cycle");
-    // delay(15000);
     initStall = true;
   }
 
@@ -181,20 +191,15 @@ void loop() {
     gearArr[1].set_position_ref(kneeArray[group1] * 1);
     gearArr[0].set_position_ref(ankleArray[group1] * 1);
     group1++;
-    if (group1 == 27) // reset if at max
+    if (group1 == 22) // reset if at max
       group1 = 0;
 
-    if (!group2Start && group1 == 13) // If group1 is halfway thru cycle, give group2 the OK
-      group2Start = true;
-    if (group2Start) // If given the OK
-    {
-      gearArr[7].set_position_ref(kneeArray[group2] * 1);
-      gearArr[6].set_position_ref(ankleArray[group2] * 1);
-      gearArr[4].set_position_ref(kneeArray[group2] * -1);
-      gearArr[3].set_position_ref(ankleArray[group2] * -1);
-      group2++;
-    }
-    if (group2 == 27) // reset if at max
+    gearArr[7].set_position_ref(kneeArray[group2] * 1);
+    gearArr[6].set_position_ref(ankleArray[group2] * 1);
+    gearArr[4].set_position_ref(kneeArray[group2] * -1);
+    gearArr[3].set_position_ref(ankleArray[group2] * -1);
+    group2++;
+    if (group2 == 22) // reset if at max
       group2 = 0;
   }
 
@@ -217,6 +222,34 @@ void loop() {
                   Serial.println("CommandID 1 - Lazy Start");
                   loopStart = true;
                   break;
+              case 2:
+                  Serial.println("CommandID 2 - Printing Status Disabled");
+                  printStart = false;
+                  break;
+              case 3:
+                  Serial.println("CommandID 3 - Printing Status Enabled");
+                  printStart = true;
+                  break;
+              case 4:
+                  Serial.println("CommandID 4 - Decrease Step");
+                  timeSlice -= 5;
+                  break;
+              case 5:
+                  Serial.println("CommandID 5 - Increase Step");
+                  timeSlice += 5;
+                  break;
+              case 6:
+                  Serial.println("CommandID 6 - Normalizing Stance");
+                  normalize_stance();
+                  break;
+              case 7: 
+                  Serial.println("CommandID 7 - Strengthening Motors to 'dangerous speed'");
+                  strengthen_motors();
+                  break;
+              case 8:
+                Serial.println("CommandID8 - Weakening Motors back down");
+                weaken_motors();
+                break;
               default:
                   Serial.println("Invalid command ID");
                   break;
@@ -226,6 +259,7 @@ void loop() {
         }
     }
 }
+
 
 // Initializes all motors
 static void initialize_all_motors()
@@ -253,7 +287,45 @@ static void all_motor_pos_to_zero()
     // Set current position to zero, and then send motor to new zero (otherwise it will spin!)
     gearArr[i].motor_pos_to_zero();
     gearArr[i].set_position_ref(0.0f);
+    delay(50);
   }
+  Serial.println("All motor positions set.");
+}
+
+// Sets the legs to the default stance, assuming motors have been zeroed at the straight orientation
+static void normalize_stance()
+{
+  group1 = 0;
+  group2 = 11;
+
+  gearArr[10].set_position_ref(kneeArray[0] * -1); 
+  gearArr[9].set_position_ref(ankleArray[0] * -1);
+  gearArr[7].set_position_ref(kneeArray[11] * 1);
+  gearArr[6].set_position_ref(ankleArray[11] * 1);
+  gearArr[4].set_position_ref(kneeArray[11] * -1);
+  gearArr[3].set_position_ref(ankleArray[11] * -1);
+  gearArr[1].set_position_ref(kneeArray[0] * 1);
+  gearArr[0].set_position_ref(ankleArray[0] * 1);
+}
+
+// Initializes motor speed values to very high value to give it enough strength to hold position when walking
+static void strengthen_motors()
+{
+  Serial.println("Raising speed limit - strength increased");
+    for (int i = 0; i < 12; i++)
+    {
+      gearArr[i].set_limit_speed(30.0f);
+    }
+}
+
+// Initializes motor speed values to lower, safer value
+static void weaken_motors()
+{
+  Serial.println("Lowering speed limit - strength decreased");
+    for (int i = 0; i < 12; i++)
+    {
+      gearArr[i].set_limit_speed(1.0f);
+    }
 }
 
 // The following functions came with the Xioami Cybergear Library - only for motor error/status communications
